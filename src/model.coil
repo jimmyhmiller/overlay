@@ -1,0 +1,308 @@
+(module overlay.model)
+(import "coil.primitive" :as primitive)
+
+(export ToolBox
+        ToolArrow
+        ToolPen
+        ToolText
+        ToolCursor
+        ToolMove
+        Mark
+        model
+        reset!
+        set-tool!
+        tool
+        set-color!
+        color-red
+        color-green
+        color-blue
+        color-alpha
+        begin!
+        drag!
+        finish!
+        undo!
+        mark-count
+        set-mark-count!
+        mark-at
+        preview-active?
+        preview-mark
+        hit-mark
+        gesture-start
+        gesture-end
+        translate-marks!
+        clear!
+        toolbar-hit
+        palette-hit)
+
+(defn ToolBox [] (-> i64)
+  0)
+
+(defn ToolArrow [] (-> i64)
+  1)
+
+(defn ToolPen [] (-> i64)
+  2)
+
+(defn ToolText [] (-> i64)
+  3)
+
+(defn ToolCursor [] (-> i64)
+  4)
+
+(defn ToolMove [] (-> i64)
+  5)
+
+(defstruct Mark [(kind i64) (x1 f64) (y1 f64) (x2 f64) (y2 f64) (red f64) (green f64) (blue f64) (alpha f64)])
+
+(defstruct Model
+  [(tool i64)
+   (drawing bool)
+   (start-x f64)
+   (start-y f64)
+   (current-x f64)
+   (current-y f64)
+   (red f64)
+   (green f64)
+   (blue f64)
+   (alpha f64)
+   (count i64)
+   (marks (array Mark 8192))])
+
+(defn model [] (-> (ptr Model))
+  (primitive/alloc-static Model))
+
+(defn reset! [] (-> i64)
+  (set! (.tool (model)) (ToolCursor))
+  (set! (.red (model)) 1.0)
+  (set! (.green (model)) 0.08)
+  (set! (.blue (model)) 0.06)
+  (set! (.alpha (model)) 1.0)
+  (set! (.drawing (model)) false)
+  (set! (.count (model)) 0)
+  0)
+
+(defn tool [] (-> i64)
+  (.tool (model)))
+
+(defn set-tool! [(value i64)] (-> i64)
+  (set! (.tool (model)) value)
+  0)
+
+(defn set-color! [(red f64) (green f64) (blue f64) (alpha f64)] (-> i64)
+  (set! (.red (model)) red)
+  (set! (.green (model)) green)
+  (set! (.blue (model)) blue)
+  (set! (.alpha (model)) alpha)
+  0)
+
+(defn color-red [] (-> f64)
+  (.red (model)))
+
+(defn color-green [] (-> f64)
+  (.green (model)))
+
+(defn color-blue [] (-> f64)
+  (.blue (model)))
+
+(defn color-alpha [] (-> f64)
+  (.alpha (model)))
+
+(defn mark-count [] (-> i64)
+  (.count (model)))
+
+(defn set-mark-count! [(count i64)] (-> i64)
+  (set! (.count (model)) count)
+  0)
+
+(defn mark-at [(index i64)] (-> Mark)
+  (load (index (field (model) marks) index)))
+
+(defn append! [(mark Mark)] (-> i64)
+  (when (< (.count (model)) 8192)
+    (store! (index (field (model) marks) (.count (model))) mark)
+    (set! (.count (model)) (+ (.count (model)) 1)))
+  0)
+
+(defn begin! [(x f64) (y f64)] (-> i64)
+  (set! (.drawing (model)) true)
+  (set! (.start-x (model)) x)
+  (set! (.start-y (model)) y)
+  (set! (.current-x (model)) x)
+  (set! (.current-y (model)) y)
+  (when (= (.tool (model)) (ToolPen))
+    (append! (Mark
+               :kind 4
+               :x1 x
+               :y1 y
+               :x2 x
+               :y2 y
+               :red (color-red)
+               :green (color-green)
+               :blue (color-blue)
+               :alpha (color-alpha)))
+    0))
+
+(defn drag! [(x f64) (y f64)] (-> i64)
+  (when (.drawing (model))
+    (set! (.current-x (model)) x)
+    (set! (.current-y (model)) y))
+  (when (and (.drawing (model)) (= (.tool (model)) (ToolPen)))
+    (let [last (mark-at (- (.count (model)) 1))]
+      (append! (Mark
+                 :kind (ToolPen)
+                 :x1 (.x2 last)
+                 :y1 (.y2 last)
+                 :x2 x
+                 :y2 y
+                 :red (color-red)
+                 :green (color-green)
+                 :blue (color-blue)
+                 :alpha (color-alpha))))
+    0))
+
+(defn preview-active? [] (-> bool)
+  (and (.drawing (model))
+       (or (= (.tool (model)) (ToolBox)) (= (.tool (model)) (ToolArrow)))))
+
+(defn preview-mark [] (-> Mark)
+  (Mark
+    :kind (.tool (model))
+    :x1 (.start-x (model))
+    :y1 (.start-y (model))
+    :x2 (.current-x (model))
+    :y2 (.current-y (model))
+    :red (color-red)
+    :green (color-green)
+    :blue (color-blue)
+    :alpha (color-alpha)))
+
+(defn finish! [(x f64) (y f64)] (-> i64)
+  (when (and (.drawing (model)) (!= (.tool (model)) (ToolPen)) (!= (.tool (model)) (ToolText)))
+    (append! (Mark
+               :kind (.tool (model))
+               :x1 (.start-x (model))
+               :y1 (.start-y (model))
+               :x2 x
+               :y2 y
+               :red (color-red)
+               :green (color-green)
+               :blue (color-blue)
+               :alpha (color-alpha)))
+    (set! (.drawing (model)) false)
+    0))
+
+(defn undo! [] (-> i64)
+  (when (> (.count (model)) 0)
+    (let [last (mark-at (- (.count (model)) 1))
+          kind (.kind last)]
+      (set! (.count (model)) (- (.count (model)) 1))
+      (when (or (= kind (ToolPen)) (= kind 4))
+        (while (and (> (.count (model)) 0)
+                    (let [previous (mark-at (- (.count (model)) 1))]
+                      (= (.kind previous) (ToolPen))))
+          (set! (.count (model)) (- (.count (model)) 1)))
+        (when (and (> (.count (model)) 0)
+                   (let [start (mark-at (- (.count (model)) 1))]
+                     (= (.kind start) 4)))
+          (set! (.count (model)) (- (.count (model)) 1))))))
+  0)
+
+(defn clear! [] (-> i64)
+  (set! (.count (model)) 0)
+  0)
+
+(defn segment-hit [(mark Mark) (x f64) (y f64)] (-> bool)
+  (let [dx (- (.x2 mark) (.x1 mark))
+        dy (- (.y2 mark) (.y1 mark))
+        length2 (+ (* dx dx) (* dy dy))
+        raw (if (< length2 0.001) 0.0 (/ (+ (* (- x (.x1 mark)) dx) (* (- y (.y1 mark)) dy)) length2))
+        t (if (< raw 0.0) 0.0 (if (> raw 1.0) 1.0 raw))
+        px (+ (.x1 mark) (* t dx))
+        py (+ (.y1 mark) (* t dy))
+        ox (- x px)
+        oy (- y py)]
+    (<= (+ (* ox ox) (* oy oy)) 100.0)))
+
+(defn mark-hit [(mark Mark) (x f64) (y f64)] (-> bool)
+  (if (= (.kind mark) (ToolBox))
+      (let [left (if (< (.x1 mark) (.x2 mark)) (.x1 mark) (.x2 mark))
+            right (if (> (.x1 mark) (.x2 mark)) (.x1 mark) (.x2 mark))
+            top (if (< (.y1 mark) (.y2 mark)) (.y1 mark) (.y2 mark))
+            bottom (if (> (.y1 mark) (.y2 mark)) (.y1 mark) (.y2 mark))]
+        (and (>= x (- left 8.0)) (<= x (+ right 8.0)) (>= y (- top 8.0)) (<= y (+ bottom 8.0))))
+      (segment-hit mark x y)))
+
+(defn hit-mark [(x f64) (y f64)] (-> i64)
+  (let [(mut i) (- (mark-count) 1)
+        (mut found) -1]
+    (while (and (>= (load i) 0) (= (load found) -1))
+      (when (mark-hit (mark-at (load i)) x y) (set! found (load i)))
+      (set! i (- (load i) 1)))
+    (load found)))
+
+(defn mark-kind [(at i64)] (-> i64)
+  (let [mark (mark-at at)] (.kind mark)))
+
+(defn gesture-start [(at i64)] (-> i64)
+  (if (or (= (mark-kind at) (ToolPen)) (= (mark-kind at) 4))
+      (let [(mut i) at]
+        (while (and (> (load i) 0) (= (mark-kind (- (load i) 1)) (ToolPen)))
+          (set! i (- (load i) 1)))
+        (if (and (> (load i) 0) (= (mark-kind (- (load i) 1)) 4)) (- (load i) 1) (load i)))
+      at))
+
+(defn gesture-end [(at i64)] (-> i64)
+  (if (or (= (mark-kind at) (ToolPen)) (= (mark-kind at) 4))
+      (let [(mut i) (+ at 1)]
+        (while (and (< (load i) (mark-count)) (= (mark-kind (load i)) (ToolPen)))
+          (set! i (+ (load i) 1)))
+        (load i))
+      (+ at 1)))
+
+(defn translate-marks! [(start i64) (end i64) (dx f64) (dy f64)] (-> i64)
+  (for [i start end]
+    (let [mark (mark-at i)]
+      (set! (index (field (model) marks) i)
+            (Mark
+              :kind (.kind mark)
+              :x1 (+ (.x1 mark) dx)
+              :y1 (+ (.y1 mark) dy)
+              :x2 (+ (.x2 mark) dx)
+              :y2 (+ (.y2 mark) dy)
+              :red (.red mark)
+              :green (.green mark)
+              :blue (.blue mark)
+              :alpha (.alpha mark)))))
+  0)
+
+;;; A compact vertical palette sits against the right edge. Coordinates are in
+;;; the flipped overlay view (origin at the top-left), so centering it vertically
+;;; keeps it clear of both the menu bar/notch and the Dock.
+(defn toolbar-hit [(x f64) (y f64) (width f64) (height f64)] (-> i64)
+  (let [left (- width 58.0)
+        proposed (* (- height 348.0) 0.5)
+        top (if (< proposed 64.0) 64.0 proposed)]
+    (if (and (>= x left) (< x (+ left 36.0)))
+        (cond (and (>= y (+ top 8.0)) (< y (+ top 168.0))) (cast i64 (/ (- y (+ top 8.0)) 40.0))
+              (and (>= y (+ top 176.0)) (< y (+ top 216.0))) 10
+              (and (>= y (+ top 216.0)) (< y (+ top 256.0))) 11
+              (and (>= y (+ top 264.0)) (< y (+ top 304.0))) 12
+              (and (>= y (+ top 304.0)) (< y (+ top 344.0))) 13
+              :else -1)
+        -1)))
+
+(defn palette-hit [(x f64) (y f64)] (-> i64)
+  (if (and (>= x 8.0) (< x 44.0))
+      (cond (and (>= y 8.0) (< y 48.0)) 4
+            (and (>= y 48.0) (< y 88.0)) 5
+            (and (>= y 88.0) (< y 128.0)) 0
+            (and (>= y 128.0) (< y 168.0)) 1
+            (and (>= y 168.0) (< y 208.0)) 2
+            (and (>= y 208.0) (< y 248.0)) 3
+            (and (>= y 256.0) (< y 296.0)) 10
+            (and (>= y 296.0) (< y 336.0)) 14
+            (and (>= y 336.0) (< y 376.0)) 11
+            (and (>= y 424.0) (< y 464.0)) 12
+            (and (>= y 464.0) (< y 504.0)) 13
+            :else -1)
+      -1))

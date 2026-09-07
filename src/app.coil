@@ -1,0 +1,944 @@
+(module overlay.app)
+(import "coil.primitive" :as primitive)
+(import "overlay.ffi" :use *)
+(import "overlay.objc" :use *)
+(import "overlay.model" :as m)
+(import "overlay.render" :as render)
+
+(export run)
+
+(defstruct Action [(kind i64) (before i64) (after i64) (object (ptr i8)) (aux (ptr i8)) (dx f64) (dy f64)])
+
+(defstruct State
+  [(app (ptr i8))
+   (window (ptr i8))
+   (view (ptr i8))
+   (palette-window (ptr i8))
+   (palette-view (ptr i8))
+   (color-well (ptr i8))
+   (status-item (ptr i8))
+   (controller (ptr i8))
+   (requested-dir (ptr i8))
+   (session-object (ptr i8))
+   (session-dir (ptr i8))
+   (cli bool)
+   (active bool)
+   (exporting bool)
+   (hover i64)
+   (tracking-area (ptr i8))
+   (result i64)
+   (series-count i64)
+   (capture-count i64)
+   (captures (array (ptr i8) 256))
+   (history-count i64)
+   (history-cursor i64)
+   (gesture-start i64)
+   (moving-kind i64)
+   (moving-start i64)
+   (moving-end i64)
+   (moving-last-x f64)
+   (moving-last-y f64)
+   (moving-dx f64)
+   (moving-dy f64)
+   (moving-field (ptr i8))
+   (moving-window (ptr i8))
+   (actions (array Action 8192))
+   (text-count i64)
+   (texts (array (ptr i8) 256))
+   (text-windows (array (ptr i8) 256))
+   (selected-text-window (ptr i8))
+   (editing-field (ptr i8))])
+
+(defn state [] (-> (ptr State))
+  (primitive/alloc-static State))
+
+(defn redraw [] (-> i64)
+  (when (!= (.view (state)) (nil))
+    (msg i64 (.view (state)) (sel c"setNeedsDisplay:") [bool] true))
+  (when (!= (.palette-view (state)) (nil))
+    (msg i64 (.palette-view (state)) (sel c"setNeedsDisplay:") [bool] true))
+  (for [i 0 (.text-count (state))]
+    (msg i64
+         (msg (ptr i8) (load (index (field (state) text-windows) i)) (sel c"contentView") [])
+         (sel c"setNeedsDisplay:")
+         [bool]
+         true))
+  0)
+
+(defn point [(view (ptr i8)) (event (ptr i8))] (-> CGPoint)
+  (msg CGPoint
+       view
+       (sel c"convertPoint:fromView:")
+       [CGPoint (ptr i8)]
+       (msg CGPoint event (sel c"locationInWindow") [])
+       (nil)))
+
+(defn draw [(self (ptr i8)) (selector (ptr i8)) (dirty CGRect)] (-> i64)
+  (let [context (msg (ptr i8) (class c"NSGraphicsContext") (sel c"currentContext") [])
+        cg (msg (ptr i8) context (sel c"CGContext") [])
+        bounds (msg CGRect self (sel c"bounds") [])]
+    (cond (= self (.palette-view (state))) (render/draw-toolbar cg (.w bounds) (.h bounds) (.hover (state)))
+          (= self (.view (state))) (render/draw-annotations cg)
+          (= (msg (ptr i8) self (sel c"window") []) (.selected-text-window (state)))
+            (do
+              (CGContextSetRGBStrokeColor cg 0.20 0.55 1.0 0.9)
+              (CGContextStrokeRectWithWidth cg (cgrect 1.0 1.0 (- (.w bounds) 2.0) (- (.h bounds) 2.0)) 2.0)
+              0)
+          :else 0))
+  0)
+
+(defn flipped [(self (ptr i8)) (selector (ptr i8))] (-> bool)
+  true)
+
+(defn accepts-first [(self (ptr i8)) (selector (ptr i8))] (-> bool)
+  true)
+
+(defn accepts-first-mouse [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> bool)
+  true)
+
+(defn update-tracking [(self (ptr i8)) (selector (ptr i8))] (-> i64)
+  (when (= self (.palette-view (state)))
+    (when (!= (.tracking-area (state)) (nil))
+      (msg i64 self (sel c"removeTrackingArea:") [(ptr i8)] (.tracking-area (state)))
+      (release (.tracking-area (state))))
+    (let [area
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"NSTrackingArea") (sel c"alloc") [])
+                 (sel c"initWithRect:options:owner:userInfo:")
+                 [CGRect u64 (ptr i8) (ptr i8)]
+                 (cgrect 0.0 0.0 0.0 0.0)
+                 (cast u64 643)
+                 self
+                 (nil))]
+      (set! (.tracking-area (state)) area)
+      (msg i64 self (sel c"addTrackingArea:") [(ptr i8)] area)))
+  0)
+
+(defn mouse-moved [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (let [p (point self event)
+        hit (if (= self (.palette-view (state))) (m/palette-hit (.x p) (.y p)) -1)]
+    (when (!= hit (.hover (state)))
+      (set! (.hover (state)) hit)
+      (redraw))
+    (msg i64
+         (if (>= hit 0)
+             (msg (ptr i8) (class c"NSCursor") (sel c"pointingHandCursor") [])
+             (msg (ptr i8) (class c"NSCursor") (sel c"arrowCursor") []))
+         (sel c"set")
+         []))
+  0)
+
+(defn mouse-exited [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (set! (.hover (state)) -1)
+  (redraw)
+  0)
+
+;;; AppKit intentionally refuses key status to ordinary borderless panels.
+;;; The overlay must own the key window while active so its transparent pixels
+;;; intercept gestures instead of activating whatever application is beneath.
+(defn panel-can-key [(self (ptr i8)) (selector (ptr i8))] (-> bool)
+  true)
+
+(defn panel-can-main [(self (ptr i8)) (selector (ptr i8))] (-> bool)
+  true)
+
+(defn discard-redo [] (-> i64)
+  (for [i (.history-cursor (state)) (.history-count (state))]
+    (let [action (load (index (field (state) actions) i))]
+      (when (or (= (.kind action) 1) (= (.kind action) 2))
+        (release (.object action))
+        (release (.aux action)))))
+  (set! (.history-count (state)) (.history-cursor (state)))
+  0)
+
+(defn record-action [(action Action)] (-> i64)
+  (discard-redo)
+  (when (< (.history-count (state)) 8192)
+    (set! (index (field (state) actions) (.history-count (state))) action)
+    (set! (.history-count (state)) (+ (.history-count (state)) 1))
+    (set! (.history-cursor (state)) (.history-count (state))))
+  0)
+
+(defn clear-history [] (-> i64)
+  (for [i 0 (.history-count (state))]
+    (let [action (load (index (field (state) actions) i))]
+      (when (or (= (.kind action) 1) (= (.kind action) 2))
+        (release (.object action))
+        (release (.aux action)))))
+  (set! (.history-count (state)) 0)
+  (set! (.history-cursor (state)) 0)
+  0)
+
+(defn add-text [(p CGPoint)] (-> i64)
+  (let [screen (msg CGRect (msg (ptr i8) (class c"NSScreen") (sel c"mainScreen") []) (sel c"frame") [])
+        text-window
+          (msg (ptr i8)
+               (msg (ptr i8) (class c"CoilOverlayPanel") (sel c"alloc") [])
+               (sel c"initWithContentRect:styleMask:backing:defer:")
+               [CGRect u64 u64 bool]
+               (cgrect (+ (.x screen) (.x p)) (+ (.y screen) (- (- (.h screen) (.y p)) 36.0)) 320.0 36.0)
+               0
+               2
+               false)
+        container
+          (msg (ptr i8)
+               (msg (ptr i8) (class c"CoilOverlayView") (sel c"alloc") [])
+               (sel c"initWithFrame:")
+               [CGRect]
+               (cgrect 0.0 0.0 320.0 36.0))
+        field
+          (msg (ptr i8)
+               (msg (ptr i8) (class c"CoilOverlayTextField") (sel c"alloc") [])
+               (sel c"initWithFrame:")
+               [CGRect]
+               (cgrect 3.0 1.0 314.0 34.0))]
+    (msg i64 field (sel c"setStringValue:") [(ptr i8)] (ns c"Comment"))
+    (msg i64 field (sel c"setEditable:") [bool] true)
+    (msg i64 field (sel c"setSelectable:") [bool] true)
+    (msg i64 field (sel c"setBordered:") [bool] false)
+    (msg i64 field (sel c"setDrawsBackground:") [bool] false)
+    (msg i64
+         field
+         (sel c"setTextColor:")
+         [(ptr i8)]
+         (msg (ptr i8)
+              (class c"NSColor")
+              (sel c"colorWithRed:green:blue:alpha:")
+              [f64 f64 f64 f64]
+              (m/color-red)
+              (m/color-green)
+              (m/color-blue)
+              (m/color-alpha)))
+    (msg i64
+         field
+         (sel c"setFont:")
+         [(ptr i8)]
+         (msg (ptr i8) (class c"NSFont") (sel c"systemFontOfSize:weight:") [f64 f64] 24.0 0.3))
+    (msg i64 field (sel c"setTarget:") [(ptr i8)] (.controller (state)))
+    (msg i64 field (sel c"setAction:") [(ptr i8)] (sel c"textCommitted:"))
+    (msg i64 text-window (sel c"setContentView:") [(ptr i8)] container)
+    (msg i64 text-window (sel c"setOpaque:") [bool] false)
+    (msg i64
+         text-window
+         (sel c"setBackgroundColor:")
+         [(ptr i8)]
+         (msg (ptr i8) (class c"NSColor") (sel c"clearColor") []))
+    (msg i64 text-window (sel c"setHasShadow:") [bool] false)
+    (msg i64 text-window (sel c"setHidesOnDeactivate:") [bool] false)
+    (msg i64 text-window (sel c"setReleasedWhenClosed:") [bool] false)
+    (msg i64 text-window (sel c"setLevel:") [i64] 25)
+    (msg i64 text-window (sel c"setCollectionBehavior:") [u64] (cast u64 17))
+    (msg i64 container (sel c"addSubview:") [(ptr i8)] field)
+    (when (< (.text-count (state)) 256)
+      (let [owned-field (retain field)]
+        (set! (index (field (state) texts) (.text-count (state))) owned-field)
+        (set! (index (field (state) text-windows) (.text-count (state))) text-window)
+        (record-action (Action
+                         :kind 1
+                         :before 0
+                         :after 0
+                         :object owned-field
+                         :aux text-window
+                         :dx 0.0
+                         :dy 0.0)))
+      (set! (.text-count (state)) (+ (.text-count (state)) 1)))
+    (set! (.editing-field (state)) field)
+    (set! (.selected-text-window (state)) text-window)
+    ;;; The canvas is still handling the mouse-down that created this field.
+    ;;; AppKit completes key-window processing for that click after mouseDown:
+    ;;; returns, so making the text window key synchronously would immediately
+    ;;; take focus back and end editing. Activate it on the next run-loop turn.
+    (msg i64 text-window (sel c"orderFront:") [(ptr i8)] (nil))
+    (msg i64
+         (.controller (state))
+         (sel c"performSelector:withObject:afterDelay:")
+         [(ptr i8) (ptr i8) f64]
+         (sel c"beginTextEditing:")
+         field
+         0.0)
+    (release field)
+    (release container))
+  0)
+
+(defn begin-text-editing [(self (ptr i8)) (selector (ptr i8)) (field (ptr i8))] (-> i64)
+  ;;; A queued activation can become stale if another control committed the
+  ;;; field before this callback ran.
+  (when (and (!= field (nil)) (= field (.editing-field (state))))
+    (let [window (msg (ptr i8) field (sel c"window") [])]
+      (msg i64 window (sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil))
+      (msg bool window (sel c"makeFirstResponder:") [(ptr i8)] field)
+      (msg i64 field (sel c"selectText:") [(ptr i8)] (nil))))
+  0)
+
+(defn color-changed [(self (ptr i8)) (selector (ptr i8)) (sender (ptr i8))] (-> i64)
+  (let [source (msg (ptr i8) sender (sel c"color") [])
+        rgb
+          (msg (ptr i8)
+               source
+               (sel c"colorUsingColorSpace:")
+               [(ptr i8)]
+               (msg (ptr i8) (class c"NSColorSpace") (sel c"deviceRGBColorSpace") []))]
+    (when (!= rgb (nil))
+      (m/set-color! (msg f64 rgb (sel c"redComponent") [])
+                    (msg f64 rgb (sel c"greenComponent") [])
+                    (msg f64 rgb (sel c"blueComponent") [])
+                    (msg f64 rgb (sel c"alphaComponent") []))))
+  0)
+
+(defn commit-text [(field (ptr i8))] (-> i64)
+  (when (and (!= field (nil)) (= field (.editing-field (state))))
+    (let [window (msg (ptr i8) field (sel c"window") [])]
+      ;;; Clear this first: resigning the field editor synchronously sends the
+      ;;; end-editing delegate callback, which must not recursively commit.
+      (set! (.editing-field (state)) (nil))
+      (msg bool window (sel c"makeFirstResponder:") [(ptr i8)] (nil))
+      (set! (.selected-text-window (state)) window))
+    (msg i64 field (sel c"setEditable:") [bool] false)
+    (msg i64 field (sel c"setSelectable:") [bool] false)
+    (choose-tool (m/ToolCursor)))
+  0)
+
+(defn text-committed [(self (ptr i8)) (selector (ptr i8)) (sender (ptr i8))] (-> i64)
+  (commit-text sender))
+
+(defn text-field-mouse-down [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (if (= self (.editing-field (state)))
+      ;;; Once editing, preserve NSTextField's complete native caret, selection,
+      ;;; and field-editor behavior. Our subclass only intercepts inactive text.
+      (msg-super i64 self (class c"NSTextField") selector [(ptr i8)] event)
+      (let [window (msg (ptr i8) self (sel c"window") [])
+            container (msg (ptr i8) self (sel c"superview") [])
+            clicks (msg i64 event (sel c"clickCount") [])
+            global (msg CGPoint (class c"NSEvent") (sel c"mouseLocation") [])]
+        (set! (.selected-text-window (state)) window)
+        (if (= (m/tool) (m/ToolMove))
+            (do
+              (set! (.moving-kind (state)) 2)
+              (set! (.moving-field (state)) self)
+              (set! (.moving-window (state)) window)
+              (set! (.moving-last-x (state)) (.x global))
+              (set! (.moving-last-y (state)) (.y global))
+              (set! (.moving-dx (state)) 0.0)
+              (set! (.moving-dy (state)) 0.0))
+            (do
+              (choose-tool (m/ToolCursor))
+              (if (>= clicks 2)
+                  (do
+                    (msg i64 self (sel c"setEditable:") [bool] true)
+                    (msg i64 self (sel c"setSelectable:") [bool] true)
+                    (set! (.editing-field (state)) self)
+                    (msg i64 window (sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil))
+                    (msg bool window (sel c"makeFirstResponder:") [(ptr i8)] self)
+                    (msg i64 self (sel c"selectText:") [(ptr i8)] (nil))
+                    0)
+                  (do (msg bool window (sel c"makeFirstResponder:") [(ptr i8)] container) 0))))
+        (redraw)))
+  0)
+
+(defn text-field-mouse-dragged [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (when (= (.moving-kind (state)) 2)
+    (let [global (msg CGPoint (class c"NSEvent") (sel c"mouseLocation") [])
+          dx (- (.x global) (.moving-last-x (state)))
+          dy (- (.y global) (.moving-last-y (state)))]
+      (translate-window (.moving-window (state)) dx dy)
+      (set! (.moving-last-x (state)) (.x global))
+      (set! (.moving-last-y (state)) (.y global))
+      (set! (.moving-dx (state)) (+ (.moving-dx (state)) dx))
+      (set! (.moving-dy (state)) (+ (.moving-dy (state)) dy))))
+  0)
+
+(defn text-field-mouse-up [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (when (= (.moving-kind (state)) 2)
+    (when (or (> (.moving-dx (state)) 0.01)
+              (< (.moving-dx (state)) -0.01)
+              (> (.moving-dy (state)) 0.01)
+              (< (.moving-dy (state)) -0.01))
+      (record-action (Action
+                       :kind 4
+                       :before 0
+                       :after 0
+                       :object (.moving-field (state))
+                       :aux (.moving-window (state))
+                       :dx (.moving-dx (state))
+                       :dy (.moving-dy (state)))))
+    (set! (.moving-kind (state)) 0))
+  0)
+
+(defn remove-active-text [(field (ptr i8)) (window (ptr i8))] (-> i64)
+  (for [i 0 (.text-count (state))]
+    (when (= (load (index (field (state) texts) i)) field)
+      (for [j i (- (.text-count (state)) 1)]
+        (set! (index (field (state) texts) j) (load (index (field (state) texts) (+ j 1))))
+        (set! (index (field (state) text-windows) j) (load (index (field (state) text-windows) (+ j 1)))))
+      (set! (.text-count (state)) (- (.text-count (state)) 1))))
+  (msg i64 window (sel c"orderOut:") [(ptr i8)] (nil))
+  (when (= window (.selected-text-window (state))) (set! (.selected-text-window (state)) (nil)))
+  0)
+
+(defn restore-active-text [(field (ptr i8)) (window (ptr i8))] (-> i64)
+  (when (< (.text-count (state)) 256)
+    (set! (index (field (state) texts) (.text-count (state))) field)
+    (set! (index (field (state) text-windows) (.text-count (state))) window)
+    (set! (.text-count (state)) (+ (.text-count (state)) 1))
+    (msg i64 window (sel c"orderFront:") [(ptr i8)] (nil)))
+  0)
+
+(defn delete-selected-text [] (-> i64)
+  (let [window (.selected-text-window (state))]
+    (when (!= window (nil))
+      (for [i 0 (.text-count (state))]
+        (when (= (load (index (field (state) text-windows) i)) window)
+          (let [field (load (index (field (state) texts) i))]
+            (remove-active-text field window)
+            (record-action (Action
+                             :kind 2
+                             :before 0
+                             :after 0
+                             :object (retain field)
+                             :aux (retain window)
+                             :dx 0.0
+                             :dy 0.0)))))))
+  (redraw)
+  0)
+
+(defn clear-texts [] (-> i64)
+  (for [i 0 (.text-count (state))]
+    (msg i64 (load (index (field (state) text-windows) i)) (sel c"orderOut:") [(ptr i8)] (nil)))
+  (set! (.text-count (state)) 0)
+  (set! (.editing-field (state)) (nil))
+  (set! (.selected-text-window (state)) (nil))
+  0)
+
+(defn clear-captures [] (-> i64)
+  (for [i 0 (.capture-count (state))]
+    (release (load (index (field (state) captures) i)))
+    (set! (index (field (state) captures) i) (nil)))
+  (set! (.capture-count (state)) 0)
+  0)
+
+(defn translate-window [(window (ptr i8)) (dx f64) (dy f64)] (-> i64)
+  (let [frame (msg CGRect window (sel c"frame") [])]
+    (msg i64 window (sel c"setFrameOrigin:") [CGPoint] (CGPoint :x (+ (.x frame) dx) :y (+ (.y frame) dy))))
+  0)
+
+(defn undo-action [] (-> i64)
+  (when (> (.history-cursor (state)) 0)
+    (set! (.history-cursor (state)) (- (.history-cursor (state)) 1))
+    (let [action (load (index (field (state) actions) (.history-cursor (state))))]
+      (case (.kind action) 0
+            (m/set-mark-count! (.before action)) 1
+            (remove-active-text (.object action) (.aux action)) 2
+            (restore-active-text (.object action) (.aux action)) 3
+            (m/translate-marks! (.before action) (.after action) (- 0.0 (.dx action)) (- 0.0 (.dy action))) 4
+            (translate-window (.aux action) (- 0.0 (.dx action)) (- 0.0 (.dy action))) 0)))
+  (redraw)
+  0)
+
+(defn redo-action [] (-> i64)
+  (when (< (.history-cursor (state)) (.history-count (state)))
+    (let [action (load (index (field (state) actions) (.history-cursor (state))))]
+      (case (.kind action) 0
+            (m/set-mark-count! (.after action)) 1
+            (restore-active-text (.object action) (.aux action)) 2
+            (remove-active-text (.object action) (.aux action)) 3
+            (m/translate-marks! (.before action) (.after action) (.dx action) (.dy action)) 4
+            (translate-window (.aux action) (.dx action) (.dy action)) 0))
+    (set! (.history-cursor (state)) (+ (.history-cursor (state)) 1)))
+  (redraw)
+  0)
+
+(defn choose-tool [(tool i64)] (-> i64)
+  (m/set-tool! tool)
+  (msg i64 (.window (state)) (sel c"setIgnoresMouseEvents:") [bool] (= tool (m/ToolCursor)))
+  (when (!= tool (m/ToolCursor))
+    (msg i64 (.window (state)) (sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil))
+    (msg bool (.window (state)) (sel c"makeFirstResponder:") [(ptr i8)] (.view (state)))
+    0)
+  (redraw)
+  0)
+
+(defn mouse-down [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (let [p (point self event)]
+    (if (and (= self (.view (state))) (!= (.editing-field (state)) (nil)))
+        ;;; Clicking the canvas while editing is an explicit click-away commit.
+        ;;; Consume this click instead of creating another annotation beneath it.
+        (commit-text (.editing-field (state)))
+        (if (= self (.palette-view (state)))
+            (let [hit (m/palette-hit (.x p) (.y p))]
+              (commit-text (.editing-field (state)))
+              (cond (and (>= hit 0) (<= hit 5)) (choose-tool hit)
+                    (= hit 10) (undo-action)
+                    (= hit 14) (redo-action)
+                    (= hit 11) (do (m/clear!) (clear-texts) (clear-history))
+                    (= hit 12) (capture-current)
+                    (= hit 13) (finish true)
+                    :else 0))
+            (if (= self (.view (state)))
+                (if (= (m/tool) (m/ToolMove))
+                    (let [hit (m/hit-mark (.x p) (.y p))]
+                      (when (>= hit 0)
+                        (set! (.moving-kind (state)) 1)
+                        (set! (.moving-start (state)) (m/gesture-start hit))
+                        (set! (.moving-end (state)) (m/gesture-end hit))
+                        (set! (.moving-last-x (state)) (.x p))
+                        (set! (.moving-last-y (state)) (.y p))
+                        (set! (.moving-dx (state)) 0.0)
+                        (set! (.moving-dy (state)) 0.0)))
+                    (if (= (m/tool) (m/ToolText))
+                        (add-text p)
+                        (do
+                          (set! (.gesture-start (state)) (m/mark-count))
+                          (m/begin! (.x p) (.y p)))))
+                (do
+                  (set! (.selected-text-window (state)) (msg (ptr i8) self (sel c"window") []))
+                  (choose-tool (m/ToolCursor))))))
+    (redraw))
+  0)
+
+(defn mouse-drag [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (when (= self (.view (state)))
+    (let [p (point self event)]
+      (if (= (.moving-kind (state)) 1)
+          (let [dx (- (.x p) (.moving-last-x (state)))
+                dy (- (.y p) (.moving-last-y (state)))]
+            (m/translate-marks! (.moving-start (state)) (.moving-end (state)) dx dy)
+            (set! (.moving-last-x (state)) (.x p))
+            (set! (.moving-last-y (state)) (.y p))
+            (set! (.moving-dx (state)) (+ (.moving-dx (state)) dx))
+            (set! (.moving-dy (state)) (+ (.moving-dy (state)) dy)))
+          (m/drag! (.x p) (.y p)))
+      (redraw)))
+  0)
+
+(defn mouse-up [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (when (= self (.view (state)))
+    (if (= (.moving-kind (state)) 1)
+        (do
+          (when (or (> (.moving-dx (state)) 0.01)
+                    (< (.moving-dx (state)) -0.01)
+                    (> (.moving-dy (state)) 0.01)
+                    (< (.moving-dy (state)) -0.01))
+            (record-action (Action
+                             :kind 3
+                             :before (.moving-start (state))
+                             :after (.moving-end (state))
+                             :object (nil)
+                             :aux (nil)
+                             :dx (.moving-dx (state))
+                             :dy (.moving-dy (state)))))
+          (set! (.moving-kind (state)) 0))
+        (let [p (point self event)
+              before (.gesture-start (state))]
+          (m/finish! (.x p) (.y p))
+          (when (> (m/mark-count) before)
+            (record-action (Action
+                             :kind 0
+                             :before before
+                             :after (m/mark-count)
+                             :object (nil)
+                             :aux (nil)
+                             :dx 0.0
+                             :dy 0.0)))))
+    (redraw))
+  0)
+
+(defn write-png [(path (ptr i8))] (-> bool)
+  (let [screen (msg CGRect (msg (ptr i8) (class c"NSScreen") (sel c"mainScreen") []) (sel c"frame") [])
+        image (CGWindowListCreateImage screen 1 0 0)]
+    (if (= image (nil))
+        false
+        (let [url (msg (ptr i8) (class c"NSURL") (sel c"fileURLWithPath:") [(ptr i8)] (ns path))
+              dest (CGImageDestinationCreateWithURL url (ns c"public.png") 1 (nil))]
+          (if (= dest (nil))
+              (do (CGImageRelease image) false)
+              (do
+                (CGImageDestinationAddImage dest image (nil))
+                (let [ok (CGImageDestinationFinalize dest)]
+                  (CFRelease dest)
+                  (CGImageRelease image)
+                  ok)))))))
+
+(defn capture-current [] (-> i64)
+  (if (>= (.capture-count (state)) 256)
+      (do
+        (set! (.result (state)) 2)
+        (set! (.active (state)) false)
+        2)
+      (let [(mut path) (zeroed (array i8 2048))
+            number (+ (.capture-count (state)) 1)]
+        (commit-text (.editing-field (state)))
+        (set! (.selected-text-window (state)) (nil))
+        (for [i 0 (.text-count (state))]
+          (let [text-view (msg (ptr i8) (load (index (field (state) text-windows) i)) (sel c"contentView") [])]
+            (msg i64 text-view (sel c"setNeedsDisplay:") [bool] true)
+            (msg i64 text-view (sel c"displayIfNeeded") [])))
+        (snprintf (index path 0) 2048 c"%s/capture-%03lld.png" (.session-dir (state)) number)
+        (set! (.exporting (state)) true)
+        (msg i64
+             (msg (ptr i8) (class c"NSColorPanel") (sel c"sharedColorPanel") [])
+             (sel c"orderOut:")
+             [(ptr i8)]
+             (nil))
+        (msg i64 (.status-item (state)) (sel c"setVisible:") [bool] false)
+        (msg i64 (.palette-window (state)) (sel c"orderOut:") [(ptr i8)] (nil))
+        (redraw)
+        (msg i64 (.view (state)) (sel c"displayIfNeeded") [])
+        (let [ok (write-png (index path 0))]
+          (msg i64 (.status-item (state)) (sel c"setVisible:") [bool] true)
+          (msg i64 (.palette-window (state)) (sel c"orderFront:") [(ptr i8)] (nil))
+          (set! (.exporting (state)) false)
+          (if ok
+              (let [saved (retain (ns (index path 0)))]
+                (set! (index (field (state) captures) (.capture-count (state))) saved)
+                (set! (.capture-count (state)) number)
+                (m/clear!)
+                (clear-texts)
+                (clear-history)
+                (redraw)
+                0)
+              (do
+                (set! (.result (state)) 2)
+                (set! (.active (state)) false)
+                2))))))
+
+(defn print-series [] (-> i64)
+  (printf c"OVERLAY_SERIES_BEGIN\n")
+  (for [i 0 (.capture-count (state))]
+    (printf c"%s\n" (utf8 (load (index (field (state) captures) i)))))
+  (printf c"OVERLAY_SERIES_END\n")
+  0)
+
+(defn finish [(save bool)] (-> i64)
+  (if save
+      (do
+        (when (or (= (.capture-count (state)) 0)
+                  (> (m/mark-count) 0)
+                  (> (.text-count (state)) 0))
+          (capture-current))
+        (when (!= (.result (state)) 2)
+          (print-series)
+          (set! (.result (state)) 0)))
+      (set! (.result (state)) 1))
+  (set! (.active (state)) false)
+  (msg i64 (.window (state)) (sel c"orderOut:") [(ptr i8)] (nil))
+  (msg i64 (.palette-window (state)) (sel c"orderOut:") [(ptr i8)] (nil))
+  0)
+
+(defn key-down [(self (ptr i8)) (selector (ptr i8)) (event (ptr i8))] (-> i64)
+  (let [key (msg i64 event (sel c"keyCode") [])
+        flags (msg u64 event (sel c"modifierFlags") [])]
+    (if (and (!= self (.view (state))) (!= self (.palette-view (state))))
+        (if (or (= key 51) (= key 117)) (delete-selected-text) 0)
+        (cond (= key 53) (finish false)
+              (and (= key 6)
+                   (!= (& flags (cast u64 1048576)) (cast u64 0))
+                   (!= (& flags (cast u64 131072)) (cast u64 0)))
+                (redo-action)
+              (and (= key 6) (!= (& flags (cast u64 1048576)) (cast u64 0))) (undo-action)
+              (= key 36) (finish true)
+              (= key 9) (choose-tool (m/ToolCursor))
+              (= key 46) (choose-tool (m/ToolMove))
+              (= key 15) (choose-tool (m/ToolBox))
+              (= key 0) (choose-tool (m/ToolArrow))
+              (= key 35) (choose-tool (m/ToolPen))
+              (= key 17) (choose-tool (m/ToolText))
+              (= key 1) (capture-current)
+              :else 0)))
+  0)
+
+(defn show [(self (ptr i8)) (selector (ptr i8)) (sender (ptr i8))] (-> i64)
+  (if (or (CGPreflightScreenCaptureAccess) (CGRequestScreenCaptureAccess))
+      (if (= (start-session) 0)
+          (do
+            (m/reset!)
+            (msg i64
+                 (.color-well (state))
+                 (sel c"setColor:")
+                 [(ptr i8)]
+                 (msg (ptr i8)
+                      (class c"NSColor")
+                      (sel c"colorWithRed:green:blue:alpha:")
+                      [f64 f64 f64 f64]
+                      (m/color-red)
+                      (m/color-green)
+                      (m/color-blue)
+                      (m/color-alpha)))
+            (clear-texts)
+            (clear-history)
+            (set! (.exporting (state)) false)
+            (set! (.hover (state)) -1)
+            (set! (.active (state)) true)
+            (choose-tool (m/ToolCursor))
+            (msg i64 (.window (state)) (sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil))
+            (msg i64 (.palette-window (state)) (sel c"orderFront:") [(ptr i8)] (nil))
+            (msg i64 (.app (state)) (sel c"activateIgnoringOtherApps:") [bool] true)
+            (msg bool (.window (state)) (sel c"makeFirstResponder:") [(ptr i8)] (.view (state)))
+            (redraw))
+          (set! (.active (state)) false))
+      (do
+        (set! (.result (state)) 2)
+        (set! (.active (state)) false)))
+  0)
+
+(defn menu-done [(self (ptr i8)) (selector (ptr i8)) (sender (ptr i8))] (-> i64)
+  (finish true))
+
+(defn menu-cancel [(self (ptr i8)) (selector (ptr i8)) (sender (ptr i8))] (-> i64)
+  (finish false))
+
+(defn register-classes [] (-> (ptr i8))
+  (let [view-class (objc_allocateClassPair (class c"NSView") c"CoilOverlayView" 0)
+        text-field-class (objc_allocateClassPair (class c"NSTextField") c"CoilOverlayTextField" 0)
+        panel-class (objc_allocateClassPair (class c"NSPanel") c"CoilOverlayPanel" 0)
+        controller (objc_allocateClassPair (class c"NSObject") c"CoilOverlayController" 0)]
+    (class_addMethod view-class
+                     (sel c"drawRect:")
+                     (cast (ptr i8) (fnptr-of draw))
+                     c"v@:{CGRect={CGPoint=dd}{CGSize=dd}}")
+    (class_addMethod view-class (sel c"isFlipped") (cast (ptr i8) (fnptr-of flipped)) c"B@:")
+    (class_addMethod view-class (sel c"acceptsFirstResponder") (cast (ptr i8) (fnptr-of accepts-first)) c"B@:")
+    (class_addMethod view-class (sel c"acceptsFirstMouse:") (cast (ptr i8) (fnptr-of accepts-first-mouse)) c"B@:@")
+    (class_addMethod view-class (sel c"updateTrackingAreas") (cast (ptr i8) (fnptr-of update-tracking)) c"v@:")
+    (class_addMethod view-class (sel c"mouseMoved:") (cast (ptr i8) (fnptr-of mouse-moved)) c"v@:@")
+    (class_addMethod view-class (sel c"mouseExited:") (cast (ptr i8) (fnptr-of mouse-exited)) c"v@:@")
+    (class_addMethod view-class (sel c"mouseDown:") (cast (ptr i8) (fnptr-of mouse-down)) c"v@:@")
+    (class_addMethod view-class (sel c"mouseDragged:") (cast (ptr i8) (fnptr-of mouse-drag)) c"v@:@")
+    (class_addMethod view-class (sel c"mouseUp:") (cast (ptr i8) (fnptr-of mouse-up)) c"v@:@")
+    (class_addMethod view-class (sel c"keyDown:") (cast (ptr i8) (fnptr-of key-down)) c"v@:@")
+    (class_addMethod text-field-class
+                     (sel c"acceptsFirstMouse:")
+                     (cast (ptr i8) (fnptr-of accepts-first-mouse))
+                     c"B@:@")
+    (class_addMethod text-field-class (sel c"mouseDown:") (cast (ptr i8) (fnptr-of text-field-mouse-down)) c"v@:@")
+    (class_addMethod text-field-class
+                     (sel c"mouseDragged:")
+                     (cast (ptr i8) (fnptr-of text-field-mouse-dragged))
+                     c"v@:@")
+    (class_addMethod text-field-class (sel c"mouseUp:") (cast (ptr i8) (fnptr-of text-field-mouse-up)) c"v@:@")
+    (class_addMethod panel-class (sel c"canBecomeKeyWindow") (cast (ptr i8) (fnptr-of panel-can-key)) c"B@:")
+    (class_addMethod panel-class (sel c"canBecomeMainWindow") (cast (ptr i8) (fnptr-of panel-can-main)) c"B@:")
+    (class_addMethod controller (sel c"showOverlay:") (cast (ptr i8) (fnptr-of show)) c"v@:@")
+    (class_addMethod controller (sel c"done:") (cast (ptr i8) (fnptr-of menu-done)) c"v@:@")
+    (class_addMethod controller (sel c"cancel:") (cast (ptr i8) (fnptr-of menu-cancel)) c"v@:@")
+    (class_addMethod controller (sel c"colorChanged:") (cast (ptr i8) (fnptr-of color-changed)) c"v@:@")
+    (class_addMethod controller
+                     (sel c"beginTextEditing:")
+                     (cast (ptr i8) (fnptr-of begin-text-editing))
+                     c"v@:@")
+    (class_addMethod controller (sel c"textCommitted:") (cast (ptr i8) (fnptr-of text-committed)) c"v@:@")
+    (objc_registerClassPair view-class)
+    (objc_registerClassPair text-field-class)
+    (objc_registerClassPair panel-class)
+    (objc_registerClassPair controller)
+    controller))
+
+(defn menu-item [(title (ptr i8)) (action (ptr i8)) (target (ptr i8))] (-> (ptr i8))
+  (let [item (msg (ptr i8) (class c"NSMenuItem") (sel c"new") [])]
+    (msg i64 item (sel c"setTitle:") [(ptr i8)] (ns title))
+    (msg i64 item (sel c"setAction:") [(ptr i8)] action)
+    (msg i64 item (sel c"setTarget:") [(ptr i8)] target)
+    item))
+
+(defn setup-status-item [(controller (ptr i8))] (-> i64)
+  (let [bar (msg (ptr i8) (class c"NSStatusBar") (sel c"systemStatusBar") [])
+        item (retain (msg (ptr i8) bar (sel c"statusItemWithLength:") [f64] -1.0))
+        button (msg (ptr i8) item (sel c"button") [])
+        menu (new c"NSMenu")]
+    (msg i64 button (sel c"setTitle:") [(ptr i8)] (ns c"✎"))
+    (msg i64 button (sel c"setToolTip:") [(ptr i8)] (ns c"Annotate Screen"))
+    (msg i64 menu (sel c"addItem:") [(ptr i8)] (menu-item c"Annotate Screen" (sel c"showOverlay:") controller))
+    (msg i64 menu (sel c"addItem:") [(ptr i8)] (msg (ptr i8) (class c"NSMenuItem") (sel c"separatorItem") []))
+    (msg i64 menu (sel c"addItem:") [(ptr i8)] (menu-item c"Quit Overlay" (sel c"terminate:") (.app (state))))
+    (msg i64 item (sel c"setMenu:") [(ptr i8)] menu)
+    (set! (.status-item (state)) item)
+    (release menu))
+  0)
+
+(defn default-output [] (-> (ptr i8))
+  (let [(mut path) (zeroed (array i8 2048))
+        home (getenv c"HOME")]
+    (assert (!= home (nil)))
+    (set! (.series-count (state)) (+ (.series-count (state)) 1))
+    (snprintf (index path 0)
+              2048
+              c"%s/.overlay/%lld-%d-%03lld"
+              home
+              (time (cast (ptr i64) 0))
+              (getpid)
+              (.series-count (state)))
+    (retain (ns (index path 0)))))
+
+(defn ensure-directory [(path (ptr i8))] (-> bool)
+  (msg bool
+       (msg (ptr i8) (class c"NSFileManager") (sel c"defaultManager") [])
+       (sel c"createDirectoryAtPath:withIntermediateDirectories:attributes:error:")
+       [(ptr i8) bool (ptr i8) (ptr i8)]
+       (ns path)
+       true
+       (nil)
+       (nil)))
+
+(defn start-session [] (-> i64)
+  (clear-captures)
+  (set! (.result (state)) 1)
+  (when (!= (.session-object (state)) (nil))
+    (release (.session-object (state))))
+  (let [directory
+          (if (= (.requested-dir (state)) (nil))
+              (default-output)
+              (retain (ns (.requested-dir (state)))))]
+    (set! (.session-object (state)) directory)
+    (set! (.session-dir (state)) (utf8 directory))
+    (if (ensure-directory (.session-dir (state)))
+        0
+        (do
+          (set! (.result (state)) 2)
+          2))))
+
+(defn run [(output (ptr i8)) (cli bool)] (-> i64)
+  (let [pool (new c"NSAutoreleasePool")
+        s (state)
+        controller-class (register-classes)]
+    (set! (.app s) (msg (ptr i8) (class c"NSApplication") (sel c"sharedApplication") []))
+    (set! (.cli s) cli)
+    (set! (.requested-dir s) output)
+    (set! (.session-object s) (nil))
+    (set! (.session-dir s) (nil))
+    (set! (.result s) 1)
+    (set! (.series-count s) 0)
+    (set! (.capture-count s) 0)
+    (set! (.history-count s) 0)
+    (set! (.history-cursor s) 0)
+    (set! (.hover s) -1)
+    (set! (.tracking-area s) (nil))
+    (msg i64 (.app s) (sel c"setActivationPolicy:") [i64] 1)
+    (msg i64 (.app s) (sel c"finishLaunching") [])
+    (let [screen (msg CGRect (msg (ptr i8) (class c"NSScreen") (sel c"mainScreen") []) (sel c"frame") [])
+          window
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"CoilOverlayPanel") (sel c"alloc") [])
+                 (sel c"initWithContentRect:styleMask:backing:defer:")
+                 [CGRect u64 u64 bool]
+                 screen
+                 0
+                 2
+                 false)
+          view
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"CoilOverlayView") (sel c"alloc") [])
+                 (sel c"initWithFrame:")
+                 [CGRect]
+                 (cgrect 0.0 0.0 (.w screen) (.h screen)))
+          palette-window
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"CoilOverlayPanel") (sel c"alloc") [])
+                 (sel c"initWithContentRect:styleMask:backing:defer:")
+                 [CGRect u64 u64 bool]
+                 (cgrect (+ (.x screen) (- (.w screen) 66.0))
+                         (+ (.y screen) (* (- (.h screen) 512.0) 0.5))
+                         52.0
+                         512.0)
+                 128
+                 2
+                 false)
+          palette-view
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"CoilOverlayView") (sel c"alloc") [])
+                 (sel c"initWithFrame:")
+                 [CGRect]
+                 (cgrect 0.0 0.0 52.0 512.0))
+          color-well
+            (msg (ptr i8)
+                 (msg (ptr i8) (class c"NSColorWell") (sel c"alloc") [])
+                 (sel c"initWithFrame:")
+                 [CGRect]
+                 (cgrect 12.0 382.0 28.0 28.0))
+          controller (msg (ptr i8) controller-class (sel c"new") [])]
+      (set! (.window s) window)
+      (set! (.view s) view)
+      (set! (.palette-window s) palette-window)
+      (set! (.palette-view s) palette-view)
+      (set! (.color-well s) color-well)
+      (set! (.controller s) controller)
+      (set! (.selected-text-window s) (nil))
+      (set! (.editing-field s) (nil))
+      (msg i64 window (sel c"setContentView:") [(ptr i8)] view)
+      (msg i64 window (sel c"setOpaque:") [bool] false)
+      (msg i64
+           window
+           (sel c"setBackgroundColor:")
+           [(ptr i8)]
+           (msg (ptr i8) (class c"NSColor") (sel c"clearColor") []))
+      (msg i64 window (sel c"setHasShadow:") [bool] false)
+      (msg i64 window (sel c"setFloatingPanel:") [bool] true)
+      (msg i64 window (sel c"setHidesOnDeactivate:") [bool] false)
+      (msg i64 window (sel c"setBecomesKeyOnlyIfNeeded:") [bool] false)
+      (msg i64 window (sel c"setIgnoresMouseEvents:") [bool] false)
+      (msg i64 window (sel c"setAcceptsMouseMovedEvents:") [bool] true)
+      (msg i64 window (sel c"setReleasedWhenClosed:") [bool] false)
+      (msg i64 window (sel c"setLevel:") [i64] 25)
+      (msg i64 window (sel c"setCollectionBehavior:") [u64] (cast u64 17))
+      (msg i64 view (sel c"setAutoresizingMask:") [u64] (cast u64 18))
+      (msg i64 palette-window (sel c"setContentView:") [(ptr i8)] palette-view)
+      (msg i64 palette-window (sel c"setOpaque:") [bool] false)
+      (msg i64
+           palette-window
+           (sel c"setBackgroundColor:")
+           [(ptr i8)]
+           (msg (ptr i8) (class c"NSColor") (sel c"clearColor") []))
+      (msg i64 palette-window (sel c"setHasShadow:") [bool] true)
+      (msg i64 palette-window (sel c"setFloatingPanel:") [bool] true)
+      (msg i64 palette-window (sel c"setHidesOnDeactivate:") [bool] false)
+      (msg i64 palette-window (sel c"setBecomesKeyOnlyIfNeeded:") [bool] true)
+      (msg i64 palette-window (sel c"setIgnoresMouseEvents:") [bool] false)
+      (msg i64 palette-window (sel c"setReleasedWhenClosed:") [bool] false)
+      (msg i64 palette-window (sel c"setLevel:") [i64] 26)
+      (msg i64 palette-window (sel c"setCollectionBehavior:") [u64] (cast u64 17))
+      (msg i64 color-well (sel c"setBordered:") [bool] false)
+      (msg i64
+           color-well
+           (sel c"setColor:")
+           [(ptr i8)]
+           (msg (ptr i8)
+                (class c"NSColor")
+                (sel c"colorWithRed:green:blue:alpha:")
+                [f64 f64 f64 f64]
+                1.0
+                0.08
+                0.06
+                1.0))
+      (msg i64 color-well (sel c"setTarget:") [(ptr i8)] controller)
+      (msg i64 color-well (sel c"setAction:") [(ptr i8)] (sel c"colorChanged:"))
+      (msg i64 palette-view (sel c"addSubview:") [(ptr i8)] color-well)
+      (update-tracking palette-view (nil))
+      (when (not cli) (setup-status-item controller))
+      (show controller (nil) (nil))
+      (while (or (not cli) (.active s))
+        (let [iteration (new c"NSAutoreleasePool")
+              event
+                (msg (ptr i8)
+                     (.app s)
+                     (sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                     [u64 (ptr i8) (ptr i8) bool]
+                     (cast u64 -1)
+                     (msg (ptr i8) (class c"NSDate") (sel c"dateWithTimeIntervalSinceNow:") [f64] 0.05)
+                     (ns c"kCFRunLoopDefaultMode")
+                     true)]
+          (when (!= event (nil)) (msg i64 (.app s) (sel c"sendEvent:") [(ptr i8)] event))
+          (release iteration)))
+      (release controller)
+      (when (!= (.tracking-area s) (nil))
+        (msg i64 palette-view (sel c"removeTrackingArea:") [(ptr i8)] (.tracking-area s))
+        (release (.tracking-area s)))
+      (release palette-view)
+      (release palette-window)
+      (release color-well)
+      (release view)
+      (release window))
+    (let [result (.result s)]
+      (clear-texts)
+      (clear-history)
+      (clear-captures)
+      (when (!= (.session-object s) (nil)) (release (.session-object s)))
+      (release pool)
+      result)))

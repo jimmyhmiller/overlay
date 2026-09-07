@@ -1,0 +1,83 @@
+(module overlay.model-test)
+(import "overlay.model" :as m)
+
+(deftest box-lifecycle
+         (m/reset!)
+         (assert (= (m/tool) (m/ToolCursor)))
+         (m/set-tool! (m/ToolBox))
+         (m/begin! 10.0 20.0)
+         (assert (m/preview-active?))
+         (m/drag! 35.0 45.0)
+         (let [preview (m/preview-mark)]
+           (assert (and (> (.x2 preview) 34.99) (< (.x2 preview) 35.01)))
+           (assert (and (> (.y2 preview) 44.99) (< (.y2 preview) 45.01))))
+         (m/finish! 50.0 80.0)
+         (assert (not (m/preview-active?)))
+         (assert (= (m/mark-count) 1))
+         (let [mark (m/mark-at 0)]
+           (assert (= (.kind mark) (m/ToolBox)))
+           (assert (and (> (.x1 mark) 9.99) (< (.x1 mark) 10.01)))
+           (assert (and (> (.y2 mark) 79.99) (< (.y2 mark) 80.01)))))
+
+(deftest pen-and-undo
+         (m/reset!)
+         (m/set-tool! (m/ToolPen))
+         (m/begin! 1.0 1.0)
+         (m/drag! 2.0 2.0)
+         (m/drag! 3.0 4.0)
+         (m/finish! 3.0 4.0)
+         (assert (= (m/mark-count) 3))
+         (m/begin! 8.0 8.0)
+         (m/drag! 9.0 9.0)
+         (m/finish! 9.0 9.0)
+         (assert (= (m/mark-count) 5))
+         (m/undo!)
+         (assert (= (m/mark-count) 3))
+         (m/undo!)
+         (assert (= (m/mark-count) 0)))
+
+(deftest toolbar-targets
+         (assert (= (m/toolbar-hit 950.0 234.0 1000.0 800.0) 0))
+         (assert (= (m/toolbar-hit 950.0 404.0 1000.0 800.0) 10))
+         (assert (= (m/toolbar-hit 950.0 444.0 1000.0 800.0) 11))
+         (assert (= (m/toolbar-hit 950.0 492.0 1000.0 800.0) 12))
+         (assert (= (m/toolbar-hit 950.0 532.0 1000.0 800.0) 13))
+         (assert (= (m/toolbar-hit 950.0 398.0 1000.0 800.0) -1))
+         (assert (= (m/toolbar-hit 10.0 10.0 1000.0 800.0) -1))
+         (assert (= (m/palette-hit 20.0 20.0) (m/ToolCursor)))
+         (assert (= (m/palette-hit 20.0 60.0) (m/ToolMove)))
+         (assert (= (m/palette-hit 20.0 100.0) (m/ToolBox)))
+         (assert (= (m/palette-hit 20.0 314.0) 14))
+         (assert (= (m/palette-hit 20.0 440.0) 12))
+         (assert (= (m/palette-hit 20.0 480.0) 13))
+         (assert (= (m/palette-hit 2.0 20.0) -1)))
+
+(deftest marks-retain-their-color
+         (m/reset!)
+         (m/set-tool! (m/ToolBox))
+         (m/set-color! 0.1 0.2 0.3 1.0)
+         (m/begin! 0.0 0.0)
+         (m/finish! 10.0 10.0)
+         (m/set-color! 0.8 0.7 0.6 1.0)
+         (m/begin! 20.0 20.0)
+         (m/finish! 30.0 30.0)
+         (let [first (m/mark-at 0)
+               second (m/mark-at 1)]
+           (assert (and (> (.red first) 0.09) (< (.red first) 0.11)))
+           (assert (and (> (.green first) 0.19) (< (.green first) 0.21)))
+           (assert (and (> (.red second) 0.79) (< (.red second) 0.81)))
+           (assert (and (> (.blue second) 0.59) (< (.blue second) 0.61)))))
+
+(deftest hit-testing-and-moving
+         (m/reset!)
+         (m/set-tool! (m/ToolBox))
+         (m/begin! 10.0 20.0)
+         (m/finish! 110.0 120.0)
+         (let [hit (m/hit-mark 60.0 70.0)]
+           (assert (= hit 0))
+           (m/translate-marks! (m/gesture-start hit) (m/gesture-end hit) 25.0 -5.0))
+         (let [moved (m/mark-at 0)]
+           (assert (and (> (.x1 moved) 34.99) (< (.x1 moved) 35.01)))
+           (assert (and (> (.y2 moved) 114.99) (< (.y2 moved) 115.01))))
+         (assert (= (m/hit-mark 10.0 20.0) -1))
+         (assert (= (m/hit-mark 60.0 70.0) 0)))

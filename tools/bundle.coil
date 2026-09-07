@@ -1,0 +1,9 @@
+(module overlay.bundle)
+(import "coil.primitive" :as primitive)
+
+(extern system :cc c [(ptr i8)] (-> i32))
+
+(defn main [] (-> i64)
+  (let [status
+          (system c"mkdir -p 'build/Overlay.app/Contents/MacOS' && cp 'build/release/overlay' 'build/Overlay.app/Contents/MacOS/Overlay' && printf '%s' '<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Overlay</string><key>CFBundleIdentifier</key><string>studio.softwarebrewing.overlay</string><key>CFBundleName</key><string>Overlay</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/><key>NSHighResolutionCapable</key><true/><key>NSScreenCaptureUsageDescription</key><string>Overlay captures the annotated screen when you choose Snap or Finish.</string></dict></plist>' > 'build/Overlay.app/Contents/Info.plist' && codesign --force --sign '6544CF3D57093858AEF51491D94BCAB7314F0843' --options runtime --timestamp=none 'build/Overlay.app'")]
+    (cast i64 status)))

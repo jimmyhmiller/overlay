@@ -1,0 +1,142 @@
+(module overlay.ffi)
+
+(export CGPoint
+        CGSize
+        CGRect
+        cgrect
+        objc_allocateClassPair
+        objc_registerClassPair
+        class_addMethod
+        CGPreflightScreenCaptureAccess
+        CGRequestScreenCaptureAccess
+        CGWindowListCreateImage
+        CGImageGetWidth
+        CGImageGetHeight
+        CGImageRelease
+        CGColorSpaceCreateDeviceRGB
+        CGColorSpaceRelease
+        CGBitmapContextCreate
+        CGBitmapContextCreateImage
+        CGContextRelease
+        CGContextDrawImage
+        CGContextSaveGState
+        CGContextRestoreGState
+        CGContextTranslateCTM
+        CGContextScaleCTM
+        CGContextSetRGBStrokeColor
+        CGContextSetRGBFillColor
+        CGContextSetLineWidth
+        CGContextSetLineCap
+        CGContextSetLineJoin
+        CGContextMoveToPoint
+        CGContextAddLineToPoint
+        CGContextStrokePath
+        CGContextStrokeRectWithWidth
+        CGContextFillEllipseInRect
+        CGImageDestinationCreateWithURL
+        CGImageDestinationAddImage
+        CGImageDestinationFinalize
+        CFRelease
+        printf
+        snprintf
+        strcmp
+        strlen
+        getenv
+        mkdir
+        time
+        getpid)
+
+(defstruct CGPoint [(x f64) (y f64)])
+
+(defstruct CGSize [(w f64) (h f64)])
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+
+(defn cgrect [(x f64) (y f64) (w f64) (h f64)] (-> CGRect)
+  (CGRect
+    :x x
+    :y y
+    :w w
+    :h h))
+
+(extern objc_allocateClassPair :cc c [(ptr i8) (ptr i8) u64] (-> (ptr i8)))
+
+(extern objc_registerClassPair :cc c [(ptr i8)] (-> void))
+
+(extern class_addMethod :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (-> bool))
+
+(extern CGPreflightScreenCaptureAccess :cc c [] (-> bool))
+
+(extern CGRequestScreenCaptureAccess :cc c [] (-> bool))
+
+(extern CGWindowListCreateImage :cc c [CGRect u32 u32 u32] (-> (ptr i8)))
+
+(extern CGImageGetWidth :cc c [(ptr i8)] (-> u64))
+
+(extern CGImageGetHeight :cc c [(ptr i8)] (-> u64))
+
+(extern CGImageRelease :cc c [(ptr i8)] (-> void))
+
+(extern CGColorSpaceCreateDeviceRGB :cc c [] (-> (ptr i8)))
+
+(extern CGColorSpaceRelease :cc c [(ptr i8)] (-> void))
+
+(extern CGBitmapContextCreate :cc c [(ptr i8) u64 u64 u64 u64 (ptr i8) u32] (-> (ptr i8)))
+
+(extern CGBitmapContextCreateImage :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern CGContextRelease :cc c [(ptr i8)] (-> void))
+
+(extern CGContextDrawImage :cc c [(ptr i8) CGRect (ptr i8)] (-> void))
+
+(extern CGContextSaveGState :cc c [(ptr i8)] (-> void))
+
+(extern CGContextRestoreGState :cc c [(ptr i8)] (-> void))
+
+(extern CGContextTranslateCTM :cc c [(ptr i8) f64 f64] (-> void))
+
+(extern CGContextScaleCTM :cc c [(ptr i8) f64 f64] (-> void))
+
+(extern CGContextSetRGBStrokeColor :cc c [(ptr i8) f64 f64 f64 f64] (-> void))
+
+(extern CGContextSetRGBFillColor :cc c [(ptr i8) f64 f64 f64 f64] (-> void))
+
+(extern CGContextSetLineWidth :cc c [(ptr i8) f64] (-> void))
+
+(extern CGContextSetLineCap :cc c [(ptr i8) i32] (-> void))
+
+(extern CGContextSetLineJoin :cc c [(ptr i8) i32] (-> void))
+
+(extern CGContextMoveToPoint :cc c [(ptr i8) f64 f64] (-> void))
+
+(extern CGContextAddLineToPoint :cc c [(ptr i8) f64 f64] (-> void))
+
+(extern CGContextStrokePath :cc c [(ptr i8)] (-> void))
+
+(extern CGContextStrokeRectWithWidth :cc c [(ptr i8) CGRect f64] (-> void))
+
+(extern CGContextFillEllipseInRect :cc c [(ptr i8) CGRect] (-> void))
+
+(extern CGImageDestinationCreateWithURL :cc c [(ptr i8) (ptr i8) u64 (ptr i8)] (-> (ptr i8)))
+
+(extern CGImageDestinationAddImage :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> void))
+
+(extern CGImageDestinationFinalize :cc c [(ptr i8)] (-> bool))
+
+(extern CFRelease :cc c [(ptr i8)] (-> void))
+
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+
+(extern snprintf :cc c [(ptr i8) u64 (ptr i8) ...] (-> i32))
+
+(extern strcmp :cc c [(ptr i8) (ptr i8)] (-> i32))
+
+(extern strlen :cc c [(ptr i8)] (-> u64))
+
+(extern getenv :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern mkdir :cc c [(ptr i8) u32] (-> i32))
+
+(extern time :cc c [(ptr i64)] (-> i64))
+
+(extern getpid :cc c [] (-> i32))

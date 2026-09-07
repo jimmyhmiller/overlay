@@ -1,0 +1,23 @@
+(module overlay.main)
+(import "overlay.app" :as app)
+(import "overlay.objc" :use [nil ns utf8 class sel msg])
+(import "overlay.ffi" :use [strcmp])
+
+(defn main [] (-> i64)
+  (let [args (msg (ptr i8) (msg (ptr i8) (class c"NSProcessInfo") (sel c"processInfo") []) (sel c"arguments") [])
+        count (msg i64 args (sel c"count") [])
+        bundle-path (msg (ptr i8) (msg (ptr i8) (class c"NSBundle") (sel c"mainBundle") []) (sel c"bundlePath") [])
+        bundled (msg bool bundle-path (sel c"hasSuffix:") [(ptr i8)] (ns c".app"))
+        (mut output) (nil)
+        (mut cli) (not bundled)
+        (mut i) 1]
+    (while (< (load i) count)
+      (let [arg (utf8 (msg (ptr i8) args (sel c"objectAtIndex:") [i64] (load i)))]
+        (when (and (= (strcmp arg c"--output") 0) (< (+ (load i) 1) count))
+          (set! output (utf8 (msg (ptr i8) args (sel c"objectAtIndex:") [i64] (+ (load i) 1))))
+          (set! cli true)
+          (set! i (+ (load i) 1)))
+        (when (= (strcmp arg c"--capture") 0)
+          (set! cli true)))
+      (set! i (+ (load i) 1)))
+    (app/run (load output) (load cli))))

@@ -1,0 +1,216 @@
+(module overlay.render)
+(import "overlay.ffi" :use *)
+(import "overlay.objc" :use *)
+(import "overlay.model" :as m)
+
+(export draw-annotations draw-toolbar)
+
+(extern atan2 :cc c [f64 f64] (-> f64))
+
+(extern cos :cc c [f64] (-> f64))
+
+(extern sin :cc c [f64] (-> f64))
+
+(defn line-style [(ctx (ptr i8)) (mark m/Mark) (width f64)] (-> i64)
+  (CGContextSetRGBStrokeColor ctx (.red mark) (.green mark) (.blue mark) (.alpha mark))
+  (CGContextSetRGBFillColor ctx (.red mark) (.green mark) (.blue mark) (.alpha mark))
+  (CGContextSetLineWidth ctx width)
+  (CGContextSetLineCap ctx 1)
+  (CGContextSetLineJoin ctx 1)
+  0)
+
+(defn arrow [(ctx (ptr i8)) (x1 f64) (y1 f64) (x2 f64) (y2 f64)] (-> i64)
+  (let [angle (atan2 (- y2 y1) (- x2 x1))
+        size 15.0]
+    (CGContextMoveToPoint ctx x1 y1)
+    (CGContextAddLineToPoint ctx x2 y2)
+    (CGContextStrokePath ctx)
+    (CGContextMoveToPoint ctx x2 y2)
+    (CGContextAddLineToPoint ctx
+                             (- x2 (* size (cos (- angle 0.52))))
+                             (- y2 (* size (sin (- angle 0.52)))))
+    (CGContextMoveToPoint ctx x2 y2)
+    (CGContextAddLineToPoint ctx
+                             (- x2 (* size (cos (+ angle 0.52))))
+                             (- y2 (* size (sin (+ angle 0.52)))))
+    (CGContextStrokePath ctx))
+  0)
+
+(defn draw-mark [(ctx (ptr i8)) (mark m/Mark)] (-> i64)
+  (line-style ctx mark 4.0)
+  (let [x (if (< (.x1 mark) (.x2 mark)) (.x1 mark) (.x2 mark))
+        y (if (< (.y1 mark) (.y2 mark)) (.y1 mark) (.y2 mark))
+        w (if (< (.x1 mark) (.x2 mark)) (- (.x2 mark) (.x1 mark)) (- (.x1 mark) (.x2 mark)))
+        h (if (< (.y1 mark) (.y2 mark)) (- (.y2 mark) (.y1 mark)) (- (.y1 mark) (.y2 mark)))]
+    (case (.kind mark) 0
+          (do (CGContextStrokeRectWithWidth ctx (cgrect x y w h) 4.0) 0) 1
+          (arrow ctx (.x1 mark) (.y1 mark) (.x2 mark) (.y2 mark)) 2
+          (do
+            (CGContextMoveToPoint ctx (.x1 mark) (.y1 mark))
+            (CGContextAddLineToPoint ctx (.x2 mark) (.y2 mark))
+            (CGContextStrokePath ctx)
+            0)
+            4
+          (do
+            (CGContextFillEllipseInRect ctx (cgrect (- (.x1 mark) 2.0) (- (.y1 mark) 2.0) 4.0 4.0))
+            0)
+            0)))
+
+(defn draw-annotations [(ctx (ptr i8))] (-> i64)
+  (for [i 0 (m/mark-count)]
+    (draw-mark ctx (m/mark-at i)))
+  (when (m/preview-active?)
+    (draw-mark ctx (m/preview-mark)))
+  0)
+
+(defn color [(white f64) (alpha f64)] (-> (ptr i8))
+  (msg (ptr i8) (class c"NSColor") (sel c"colorWithWhite:alpha:") [f64 f64] white alpha))
+
+(defn label [(text (ptr i8)) (x f64) (y f64) (w f64) (selected bool)] (-> i64)
+  (let [attrs (new c"NSMutableDictionary")
+        font (msg (ptr i8) (class c"NSFont") (sel c"systemFontOfSize:weight:") [f64 f64] 13.0 0.18)]
+    (msg i64 attrs (sel c"setObject:forKey:") [(ptr i8) (ptr i8)] font (constant-object c"NSFontAttributeName"))
+    (msg i64
+         attrs
+         (sel c"setObject:forKey:")
+         [(ptr i8) (ptr i8)]
+         (if selected (color 1.0 1.0) (color 0.78 1.0))
+         (constant-object c"NSForegroundColorAttributeName"))
+    (msg i64 (ns text) (sel c"drawInRect:withAttributes:") [CGRect (ptr i8)] (cgrect x y w 22.0) attrs)
+    (release attrs))
+  0)
+
+(defn rounded-fill [(rect CGRect) (radius f64) (fill (ptr i8))] (-> i64)
+  (msg i64 fill (sel c"setFill") [])
+  (msg i64
+       (msg (ptr i8)
+            (class c"NSBezierPath")
+            (sel c"bezierPathWithRoundedRect:xRadius:yRadius:")
+            [CGRect f64 f64]
+            rect
+            radius
+            radius)
+       (sel c"fill")
+       [])
+  0)
+
+(defn accent [] (-> (ptr i8))
+  (msg (ptr i8)
+       (class c"NSColor")
+       (sel c"colorWithRed:green:blue:alpha:")
+       [f64 f64 f64 f64]
+       1.0
+       0.20
+       0.17
+       1.0))
+
+(defn icon [(name (ptr i8)) (x f64) (y f64) (selected bool) (primary bool)] (-> i64)
+  (let [base
+          (msg (ptr i8)
+               (class c"NSImage")
+               (sel c"imageWithSystemSymbolName:accessibilityDescription:")
+               [(ptr i8) (ptr i8)]
+               (ns name)
+               (nil))
+        tint (if primary (color 1.0 1.0) (if selected (accent) (color 0.76 1.0)))
+        size-configuration
+          (msg (ptr i8)
+               (class c"NSImageSymbolConfiguration")
+               (sel c"configurationWithPointSize:weight:")
+               [f64 f64]
+               17.0
+               0.18)
+        color-configuration
+          (msg (ptr i8)
+               (class c"NSImageSymbolConfiguration")
+               (sel c"configurationWithHierarchicalColor:")
+               [(ptr i8)]
+               tint)
+        configuration
+          (msg (ptr i8)
+               size-configuration
+               (sel c"configurationByApplyingConfiguration:")
+               [(ptr i8)]
+               color-configuration)
+        image
+          (msg (ptr i8)
+               base
+               (sel c"imageWithSymbolConfiguration:")
+               [(ptr i8)]
+               configuration)]
+    (when (!= image (nil))
+      (let [size (msg CGSize image (sel c"size") [])]
+        (msg i64
+             image
+             (sel c"drawInRect:")
+             [CGRect]
+             (cgrect (+ x (* (- 20.0 (.w size)) 0.5))
+                     (+ y (* (- 20.0 (.h size)) 0.5))
+                     (.w size)
+                     (.h size)))))
+    0))
+
+(defn tooltip-text [(hit i64)] (-> (ptr i8))
+  (case hit 0
+        c"Rectangle  R" 1
+        c"Arrow  A" 2
+        c"Pen  P" 3
+        c"Text  T" 10
+        c"Undo  ⌘Z" 11
+        c"Clear" 14
+        c"Redo  ⇧⌘Z" 12
+        c"Snap  S" 13
+        c"Finish  ↩" c""))
+
+(defn tooltip [(hit i64) (left f64) (y f64)] (-> i64)
+  (when (>= hit 0)
+    (rounded-fill (cgrect (- left 122.0) (+ y 3.0) 112.0 30.0) 8.0 (color 0.06 0.90))
+    (label (tooltip-text hit) (- left 112.0) (+ y 7.0) 96.0 false))
+  0)
+
+(defn separator [(ctx (ptr i8)) (x f64) (y f64)] (-> i64)
+  (CGContextSetRGBStrokeColor ctx 1.0 1.0 1.0 0.11)
+  (CGContextSetLineWidth ctx 1.0)
+  (CGContextMoveToPoint ctx x y)
+  (CGContextAddLineToPoint ctx (+ x 32.0) y)
+  (CGContextStrokePath ctx)
+  0)
+
+(defn button [(name (ptr i8)) (hit i64) (x f64) (y f64) (hover i64) (selected bool) (primary bool)] (-> i64)
+  (when (or selected (= hover hit) primary)
+    (rounded-fill (cgrect x y 36.0 36.0)
+                  10.0
+                  (if primary
+                      (accent)
+                      (if selected
+                          (msg (ptr i8)
+                               (class c"NSColor")
+                               (sel c"colorWithRed:green:blue:alpha:")
+                               [f64 f64 f64 f64]
+                               1.0
+                               0.20
+                               0.17
+                               0.14)
+                          (color 1.0 0.075)))))
+  (icon name (+ x 8.0) (+ y 8.0) selected primary)
+  0)
+
+(defn draw-toolbar [(ctx (ptr i8)) (width f64) (height f64) (hover i64)] (-> i64)
+  (let [left 0.0
+        top 0.0
+        x (+ left 8.0)]
+    (rounded-fill (cgrect left top 52.0 512.0) 17.0 (color 0.055 0.88))
+    (button c"cursorarrow" 4 x (+ top 10.0) hover (= (m/tool) 4) false)
+    (button c"arrow.up.and.down.and.arrow.left.and.right" 5 x (+ top 50.0) hover (= (m/tool) 5) false)
+    (button c"rectangle" 0 x (+ top 90.0) hover (= (m/tool) 0) false)
+    (button c"arrow.up.right" 1 x (+ top 130.0) hover (= (m/tool) 1) false)
+    (button c"pencil.tip" 2 x (+ top 170.0) hover (= (m/tool) 2) false)
+    (button c"textformat" 3 x (+ top 210.0) hover (= (m/tool) 3) false)
+    (separator ctx (+ left 10.0) (+ top 252.0))
+    (button c"arrow.uturn.backward" 10 x (+ top 258.0) hover false false)
+    (button c"arrow.uturn.forward" 14 x (+ top 298.0) hover false false)
+    (button c"trash" 11 x (+ top 338.0) hover false false)
+    (separator ctx (+ left 10.0) (+ top 420.0))
+    (button c"camera" 12 x (+ top 426.0) hover false false)
+    (button c"checkmark" 13 x (+ top 466.0) hover false true))
+  0)

@@ -1,0 +1,12 @@
+[package]
+name = "overlay"
+entry = "src/main.coil"
+source-roots = ["src", "tests", "tools"]
+
+[link]
+frameworks = ["AppKit", "CoreGraphics", "ImageIO", "CoreFoundation"]
+libs = ["objc"]
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]

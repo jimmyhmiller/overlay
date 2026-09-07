@@ -1,0 +1,71 @@
+(module overlay.objc)
+(import "coil.primitive" :as primitive)
+
+(export class sel msg msg-super nil ns new release retain utf8 constant-object)
+
+(defstruct ObjcSuper [(receiver (ptr i8)) (super-class (ptr i8))])
+
+(extern objc_getClass :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern sel_registerName :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern objc_msgSend :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(extern objc_msgSendSuper :cc c [(ptr ObjcSuper) (ptr i8)] (-> (ptr i8)))
+
+(extern malloc :cc c [isize] (-> (ptr i8)))
+
+(extern free :cc c [(ptr i8)] (-> i64))
+
+(extern dlsym :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(defn class [(name (ptr i8))] (-> (ptr i8))
+  (objc_getClass name))
+
+(defn sel [(name (ptr i8))] (-> (ptr i8))
+  (sel_registerName name))
+
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret)
+                                       (primitive/fnptr-of objc_msgSend))
+                       ~recv
+                       ~selector
+                       ~@args))
+
+(defn msg-super [(ret Code) (recv Code) (superclass Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(let [info (primitive/cast (ptr ObjcSuper) (malloc (primitive/sizeof ObjcSuper)))]
+     (assert (!= info (primitive/cast (ptr ObjcSuper) 0)))
+     (store! (field info receiver) ~recv)
+     (store! (field info super-class) ~superclass)
+     (let [result
+             (primitive/call-ptr (primitive/cast (fnptr c [(ptr ObjcSuper) (ptr i8) ~@argtypes] ~ret)
+                                                 (primitive/fnptr-of objc_msgSendSuper))
+                                 info
+                                 ~selector
+                                 ~@args)]
+       (free (primitive/cast (ptr i8) info))
+       result)))
+
+(defn nil [] (-> (ptr i8))
+  (cast (ptr i8) 0))
+
+(defn ns [(text (ptr i8))] (-> (ptr i8))
+  (msg (ptr i8) (class c"NSString") (sel c"stringWithUTF8String:") [(ptr i8)] text))
+
+(defn new [(name (ptr i8))] (-> (ptr i8))
+  (msg (ptr i8) (class name) (sel c"new") []))
+
+(defn release [(obj (ptr i8))] (-> i64)
+  (msg i64 obj (sel c"release") [])
+  0)
+
+(defn retain [(obj (ptr i8))] (-> (ptr i8))
+  (msg (ptr i8) obj (sel c"retain") []))
+
+(defn utf8 [(obj (ptr i8))] (-> (ptr i8))
+  (msg (ptr i8) obj (sel c"UTF8String") []))
+
+(defn constant-object [(name (ptr i8))] (-> (ptr i8))
+  (let [symbol (dlsym (cast (ptr i8) -2) name)]
+    (assert (!= symbol (nil)))
+    (load (cast (ptr (ptr i8)) symbol))))
